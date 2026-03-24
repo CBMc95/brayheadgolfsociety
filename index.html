@@ -473,6 +473,25 @@ a { text-decoration: none; }
       <div class="field"><label>Email</label><input type="email" id="login-email" placeholder="you@example.com" autocomplete="email"></div>
       <div class="field"><label>Password</label><input type="password" id="login-password" placeholder="Your password" autocomplete="current-password"></div>
       <button class="btn btn-primary" onclick="doLogin()">Sign In</button>
+
+      <div style="display:flex;align-items:center;gap:10px;margin:16px 0;">
+        <div style="flex:1;height:1px;background:var(--border)"></div>
+        <span style="font-size:12px;color:var(--muted);white-space:nowrap">OR</span>
+        <div style="flex:1;height:1px;background:var(--border)"></div>
+      </div>
+
+      <div id="magic-link-section">
+        <button class="btn" style="width:100%;border:2px solid var(--g500);color:var(--g600);font-weight:700;padding:14px;border-radius:12px;font-size:15px;" onclick="sendMagicLink()">
+          ✉️ Send Magic Sign-In Link
+        </button>
+        <p style="font-size:12px;color:var(--muted);text-align:center;margin-top:8px;">No password needed — we'll email you a one-click sign-in link</p>
+      </div>
+
+      <div id="magic-link-sent" class="hidden" style="background:var(--g100);border:1px solid var(--g400);border-radius:12px;padding:16px;text-align:center;">
+        <div style="font-size:28px;margin-bottom:8px">📬</div>
+        <p style="font-weight:700;color:var(--g700);margin-bottom:4px">Check your email!</p>
+        <p style="font-size:13px;color:var(--muted)">We sent a sign-in link to <strong id="magic-link-email"></strong>. Click it to sign in instantly — also check your spam folder.</p>
+      </div>
     </div>
 
     <!-- Register form -->
@@ -709,11 +728,44 @@ function switchAuthTab(tab) {
     document.getElementById(`form-${t}`).classList.toggle('hidden', t !== tab);
   });
   document.getElementById('auth-error').classList.add('hidden');
+  // Reset magic link section
+  const mls = document.getElementById('magic-link-section');
+  const mlsent = document.getElementById('magic-link-sent');
+  if (mls) mls.classList.remove('hidden');
+  if (mlsent) mlsent.classList.add('hidden');
 }
 
-function showAuthError(msg) {
+function showAuthError(msg, showResend = false) {
   const el = document.getElementById('auth-error');
-  el.textContent = msg; el.classList.remove('hidden');
+  el.innerHTML = msg + (showResend ? ` <span onclick="resendConfirmation()" style="color:var(--g600);font-weight:700;cursor:pointer;text-decoration:underline">Resend email</span>` : '');
+  el.classList.remove('hidden');
+}
+
+async function resendConfirmation() {
+  const email = document.getElementById('login-email').value.trim();
+  if (!email) { showAuthError('Enter your email address above first.'); return; }
+  const { error } = await db.auth.resend({ type: 'signup', email });
+  if (!error) showAuthError('✅ Confirmation email resent — check your inbox and spam folder.');
+  else showAuthError('Could not resend: ' + error.message);
+}
+
+async function sendMagicLink() {
+  const email = document.getElementById('login-email').value.trim();
+  if (!email) { showAuthError('Enter your email address above first, then click the magic link button.'); return; }
+  document.getElementById('auth-error').classList.add('hidden');
+  const { error } = await db.auth.signInWithOtp({ email, options: { shouldCreateUser: false } });
+  if (error) {
+    // If user doesn't exist, create them with magic link
+    if (error.message.toLowerCase().includes('not found') || error.message.toLowerCase().includes('no user')) {
+      const { error: e2 } = await db.auth.signInWithOtp({ email });
+      if (e2) { showAuthError('Could not send link: ' + e2.message); return; }
+    } else {
+      showAuthError('Could not send link: ' + error.message); return;
+    }
+  }
+  document.getElementById('magic-link-section').classList.add('hidden');
+  document.getElementById('magic-link-email').textContent = email;
+  document.getElementById('magic-link-sent').classList.remove('hidden');
 }
 
 async function doLogin() {
@@ -721,7 +773,16 @@ async function doLogin() {
   const pass  = document.getElementById('login-password').value;
   if (!email || !pass) { showAuthError('Please enter your email and password.'); return; }
   const { error } = await db.auth.signInWithPassword({ email, password: pass });
-  if (error) showAuthError(error.message);
+  if (error) {
+    const msg = error.message ?? '';
+    if (msg.toLowerCase().includes('email not confirmed')) {
+      showAuthError('You need to confirm your email first. Check your inbox (and spam).', true);
+    } else if (msg.toLowerCase().includes('invalid login credentials')) {
+      showAuthError('Incorrect email or password. Please try again.');
+    } else {
+      showAuthError(msg);
+    }
+  }
 }
 
 async function doRegister() {
@@ -731,9 +792,16 @@ async function doRegister() {
   const hcp   = parseFloat(document.getElementById('reg-handicap').value) || 18;
   if (!name || !email || !pass) { showAuthError('Please fill in all fields.'); return; }
   if (pass.length < 6) { showAuthError('Password must be at least 6 characters.'); return; }
-  const { error } = await db.auth.signUp({ email, password: pass, options: { data: { name, handicap: hcp } } });
-  if (error) showAuthError(error.message);
-  else { showAuthError(''); toast('✅ Account created! You can now sign in.'); switchAuthTab('login'); }
+  const { data: signUpData, error } = await db.auth.signUp({ email, password: pass, options: { data: { name, handicap: hcp } } });
+  if (error) { showAuthError(error.message); return; }
+  // Check if email confirmation is required
+  const needsConfirm = signUpData?.user && !signUpData.session;
+  switchAuthTab('login');
+  if (needsConfirm) {
+    showAuthError('✅ Account created! Check your email for a confirmation link — or use the Magic Sign-In Link below to skip that step.');
+  } else {
+    toast('✅ Welcome to the Society!');
+  }
 }
 
 async function loadProfile(uid) {
